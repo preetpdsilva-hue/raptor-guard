@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raptor Guard — SOC Operations</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    :root {
+      --bg: #f8fafc;
+      --card-bg: #ffffff;
+      --text-main: #0f172a;
+      --text-muted: #64748b;
+      --border: #e2e8f0;
+      --primary-blue: #0066cc;
+      --danger: #dc2626;
+      --warning: #d97706;
+      --success: #16a34a;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body { background-color: var(--bg); color: var(--text-main); padding: 20px 30px; }
+
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 20px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 24px;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand h1 { font-size: 22px; font-weight: 700; color: #004080; }
+    .badge { background: #e0f2fe; color: var(--primary-blue); font-size: 11px; padding: 4px 8px; border-radius: 4px; font-weight: 600; }
+
+    .controls { display: flex; gap: 10px; align-items: center; }
+    select, input, button {
+      padding: 8px 12px;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      font-size: 13px;
+      outline: none;
+    }
+    button { background: var(--primary-blue); color: white; border: none; font-weight: 600; cursor: pointer; }
+    button:hover { opacity: 0.9; }
+
+    .metrics-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .metric-card {
+      background: var(--card-bg);
+      padding: 18px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.02);
+    }
+    .metric-title { font-size: 12px; text-transform: uppercase; color: var(--text-muted); font-weight: 600; margin-bottom: 8px; }
+    .metric-value { font-size: 28px; font-weight: 700; }
+
+    .charts-grid {
+      display: grid;
+      grid-template-columns: 2fr 1fr;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .chart-card {
+      background: var(--card-bg);
+      padding: 20px;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      height: 260px;
+    }
+    .chart-header { font-size: 14px; font-weight: 600; margin-bottom: 12px; }
+
+    .table-container {
+      background: var(--card-bg);
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      padding: 20px;
+    }
+    .table-header-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; padding: 12px; color: var(--text-muted); font-weight: 600; border-bottom: 1px solid var(--border); }
+    td { padding: 12px; border-bottom: 1px solid var(--border); }
+
+    .lvl-badge { padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; }
+    .lvl-low { background: #dcfce7; color: var(--success); }
+    .lvl-mid { background: #fef3c7; color: var(--warning); }
+    .lvl-high { background: #fee2e2; color: var(--danger); }
+
+    .soc-badge { padding: 3px 8px; border-radius: 4px; font-size: 11px; font-weight: 600; }
+    .soc-tp { background: #fee2e2; color: var(--danger); }
+    .soc-fp { background: #f1f5f9; color: var(--text-muted); }
+    .soc-open { background: #e0f2fe; color: var(--primary-blue); }
+
+    .btn-triage { padding: 4px 10px; font-size: 12px; border-radius: 4px; }
+
+    /* Modal */
+    #triageModal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.5);
+      justify-content: center;
+      align-items: center;
+      z-index: 100;
+    }
+    .modal-box {
+      background: white;
+      padding: 24px;
+      border-radius: 8px;
+      width: 480px;
+      max-width: 90%;
+    }
+  </style>
+</head>
+<body>
+
+  <header>
+    <div class="brand">
+      <h1>Raptor Guard</h1>
+      <span class="badge">SIEM / SOC Operations</span>
+    </div>
+    <div class="controls">
+      <label for="deviceSelector" style="font-size: 12px; font-weight:600; color: var(--text-muted);">Target Host:</label>
+      <select id="deviceSelector" onchange="selectHostFromDropdown()">
+        <option value="all">🌐 All Agents (Global View)</option>
+      </select>
+      <input type="text" id="targetIpInput" placeholder="Add IP (e.g. 192.168.1.103)" />
+      <button onclick="addAndSwitchHost()">Connect</button>
+      <span id="clockTime" style="font-size: 13px; font-weight:600; margin-left:12px; color: var(--text-muted);">--:--:--</span>
+    </div>
+  </header>
+
+  <div class="metrics-grid">
+    <div class="metric-card">
+      <div class="metric-title">Total Telemetry Events</div>
+      <div class="metric-value" id="m-total" style="color: var(--primary-blue);">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Level 10+ Critical Threats</div>
+      <div class="metric-value" id="m-l10" style="color: var(--danger);">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Authentication Failures</div>
+      <div class="metric-value" id="m-fail" style="color: var(--warning);">0</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-title">Blocked (True Positives)</div>
+      <div class="metric-value" id="m-block" style="color: var(--success);">0</div>
+    </div>
+  </div>
+
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-header">Alerts Level Evolution (Real-time Trend)</div>
+      <div style="position: relative; height: 200px;">
+        <canvas id="areaChart"></canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-header">MITRE ATT&CK Tactics</div>
+      <div style="position: relative; height: 200px;">
+        <canvas id="mitreChart"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <div class="table-container">
+    <div class="table-header-row">
+      <h2 style="font-size: 16px;">Live Threat Intelligence & Log Stream</h2>
+      <input type="text" id="searchBox" placeholder="Filter by IP, Tactic, or Rule..." style="width: 260px;" />
+    </div>
+    <table>
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Host IP</th>
+          <th>User / Entity</th>
+          <th>MITRE ID</th>
+          <th>Tactic</th>
+          <th>Threat Description</th>
+          <th>Level</th>
+          <th>Status</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+  </div>
+
+  <!-- Triage Modal -->
+  <div id="triageModal">
+    <div class="modal-box">
+      <h3 style="margin-bottom: 12px;">Security Analyst Triage</h3>
+      <input type="hidden" id="modalLogId" />
+      <input type="hidden" id="modalIp" />
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 8px;">Raw Telemetry Message:</p>
+      <pre id="modalRawMessage" style="background:#f1f5f9; padding: 10px; border-radius: 4px; font-size: 12px; white-space: pre-wrap; word-break: break-all; margin-bottom: 12px;"></pre>
+      <label style="font-size: 12px; font-weight:600;">Analyst Notes:</label>
+      <textarea id="modalNotes" style="width: 100%; height: 70px; padding: 8px; margin: 6px 0 16px 0; border: 1px solid var(--border); border-radius: 4px;"></textarea>
+      <div style="display: flex; justify-content: flex-end; gap: 8px;">
+        <button style="background:#64748b;" onclick="closeModal()">Cancel</button>
+        <button style="background:var(--success);" onclick="executeVerdict('FP')">False Positive</button>
+        <button style="background:var(--danger);" onclick="executeVerdict('TP')">Remediate (Block IP)</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let currentSessionHost = "all";
+    let logs = [];
+    let lastSeenId = 0;
+    let totalEvents = 0, level10Count = 0, authFailures = 0, blockedCount = 0;
+    let areaData = Array(20).fill(0);
+    let mitreDist = {};
+    let areaChart, mitreChart;
+
+    function updateClock() {
+      const d = new Date();
+      document.getElementById('clockTime').textContent = d.toLocaleTimeString();
+    }
+    setInterval(updateClock, 1000);
+    updateClock();
+
+    function initCharts() {
+      const areaCtx = document.getElementById('areaChart').getContext('2d');
+      areaChart = new Chart(areaCtx, {
+        type: 'line',
+        data: {
+          labels: Array(20).fill(''),
+          datasets: [{
+            data: areaData,
+            borderColor: '#0066cc',
+            backgroundColor: 'rgba(0, 102, 204, 0.12)',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 2
+          }]
+        },
+        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { beginAtZero: true, max: 15 } } }
+      });
+
+      const mitreCtx = document.getElementById('mitreChart').getContext('2d');
+      mitreChart = new Chart(mitreCtx, {
+        type: 'doughnut',
+        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#0066cc', '#16a34a', '#d97706', '#dc2626', '#8b5cf6'] }] },
+        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } } } }
+      });
+    }
+
+    async function loadDeviceList() {
+      try {
+        const res = await fetch('/api/hosts');
+        if (res.ok) {
+          const hosts = await res.json();
+          const sel = document.getElementById('deviceSelector');
+          sel.innerHTML = '<option value="all">🌐 All Agents (Global View)</option>';
+          hosts.forEach(h => {
+            const opt = document.createElement('option');
+            opt.value = h;
+            opt.textContent = h;
+            if (h === currentSessionHost) opt.selected = true;
+            sel.appendChild(opt);
+          });
+        }
+      } catch (e) {}
+    }
+
+    function selectHostFromDropdown() {
+      switchHost(document.getElementById('deviceSelector').value);
+    }
+
+    async function addAndSwitchHost() {
+      const host = document.getElementById('targetIpInput').value.trim();
+      if (!host) return;
+      await fetch('/api/targets', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ host: host })
+      });
+      await loadDeviceList();
+      switchHost(host);
+    }
+
+    function switchHost(host) {
+      currentSessionHost = host;
+      logs = [];
+      totalEvents = 0; level10Count = 0; authFailures = 0; blockedCount = 0;
+      mitreDist = {}; lastSeenId = 0;
+      areaData = Array(20).fill(0);
+      document.getElementById('tableBody').innerHTML = '';
+      renderMetrics();
+    }
+
+    function openTriage(id) {
+      const log = logs.find(l => l.id === id);
+      if (!log) return;
+      document.getElementById('modalLogId').value = id;
+      document.getElementById('modalIp').value = log.ip || "127.0.0.1";
+      document.getElementById('modalRawMessage').textContent = log.message || "No telemetry captured.";
+      document.getElementById('modalNotes').value = log.analyst_notes || '';
+      document.getElementById('triageModal').style.display = 'flex';
+    }
+
+    function closeModal() {
+      document.getElementById('triageModal').style.display = 'none';
+    }
+
+    async function executeVerdict(verdictType) {
+      const id = parseInt(document.getElementById('modalLogId').value);
+      const ip = document.getElementById('modalIp').value;
+      let notes = document.getElementById('modalNotes').value.trim();
+
+      if (verdictType === 'TP') {
+        notes = notes || "Confirmed malicious. IP blocked.";
+        await fetch('/api/remediate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'block_ip', target: ip, log_id: id, status: 'True_Positive' })
+        });
+        await fetch(`/api/logs/${id}/status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'True_Positive', notes: '[TRUE POSITIVE] ' + notes })
+        });
+      } else {
+        notes = notes || "Verified benign activity.";
+        await fetch(`/api/logs/${id}/status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: 'False_Positive', notes: '[FALSE POSITIVE] ' + notes })
+        });
+      }
+
+      const log = logs.find(l => l.id === id);
+      if (log) {
+        log.response_status = verdictType === 'TP' ? 'True_Positive' : 'False_Positive';
+        log.analyst_notes = notes;
+        if (verdictType === 'TP') blockedCount++;
+        renderMetrics();
+        rerenderTable();
+      }
+      closeModal();
+    }
+
+    function pushEvent(ev) {
+      logs.unshift(ev);
+      if (logs.length > 200) logs.pop();
+
+      totalEvents++;
+      const lvl = parseInt(ev.level) || 3;
+      if (lvl >= 10) level10Count++;
+      if (String(ev.type).includes('Failed') || String(ev.type).includes('Brute Force')) authFailures++;
+      if (ev.response_status === 'True_Positive') blockedCount++;
+      renderMetrics();
+
+      const mKey = ev.mitre_tactic || "Discovery";
+      mitreDist[mKey] = (mitreDist[mKey] || 0) + 1;
+      mitreChart.data.labels = Object.keys(mitreDist);
+      mitreChart.data.datasets[0].data = Object.values(mitreDist);
+      mitreChart.update();
+
+      areaData.shift();
+      areaData.push(lvl);
+      areaChart.update();
+
+      renderRow(ev);
+    }
+
+    function renderMetrics() {
+      document.getElementById('m-total').textContent = totalEvents;
+      document.getElementById('m-l10').textContent = level10Count;
+      document.getElementById('m-fail').textContent = authFailures;
+      document.getElementById('m-block').textContent = blockedCount;
+    }
+
+    function renderRow(ev) {
+      const tbody = document.getElementById('tableBody');
+      const tr = document.createElement('tr');
+      const lvl = parseInt(ev.level) || 3;
+
+      let lvlClass = 'lvl-low';
+      if (lvl >= 10) lvlClass = 'lvl-high';
+      else if (lvl >= 6) lvlClass = 'lvl-mid';
+
+      let statusBadge = '<span class="soc-badge soc-open">OPEN</span>';
+      if (ev.response_status === 'True_Positive') statusBadge = '<span class="soc-badge soc-tp">TRUE POSITIVE</span>';
+      if (ev.response_status === 'False_Positive') statusBadge = '<span class="soc-badge soc-fp">FALSE POSITIVE</span>';
+
+      tr.innerHTML = `
+        <td>${String(ev.time).substring(11, 19) || 'Just now'}</td>
+        <td style="font-weight:600; color:var(--primary-blue);">${ev.ip}</td>
+        <td>${ev.target || 'SYSTEM'}</td>
+        <td style="font-family: monospace;">${ev.mitre_technique || 'None'}</td>
+        <td>${ev.mitre_tactic || 'General'}</td>
+        <td>${ev.type}</td>
+        <td><span class="lvl-badge ${lvlClass}">${lvl}</span></td>
+        <td>${statusBadge}</td>
+        <td><button class="btn-triage" onclick="openTriage(${ev.id})">Triage</button></td>
+      `;
+      tbody.prepend(tr);
+      if (tbody.children.length > 100) tbody.lastChild.remove();
+    }
+
+    function rerenderTable() {
+      document.getElementById('tableBody').innerHTML = '';
+      logs.forEach(ev => renderRow(ev));
+    }
+
+    async function fetchRealLogs() {
+      try {
+        const res = await fetch(`/api/logs?host=${encodeURIComponent(currentSessionHost)}`);
+        if (res.ok) {
+          const dbLogs = await res.json();
+          dbLogs.reverse().forEach(ev => {
+            if (ev.id > lastSeenId) {
+              pushEvent(ev);
+              lastSeenId = ev.id;
+            }
+          });
+        }
+      } catch (e) {}
+      setTimeout(fetchRealLogs, 1500);
+    }
+
+    window.onload = () => {
+      initCharts();
+      loadDeviceList();
+      fetchRealLogs();
+    };
+  </script>
+</body>
+</html>
