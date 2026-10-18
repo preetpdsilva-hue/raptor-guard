@@ -6,13 +6,13 @@ import subprocess
 import json
 from datetime import datetime
 
-def read_windows_security_events(limit=10):
-    """Fetches recent Windows Security events using PowerShell."""
+def poll_all_channels(limit=10):
+    """Fetches recent Windows Security events using PowerShell in 24-hour local time."""
     ps_script = f"""
     Get-WinEvent -LogName Security -MaxEvents {limit} | ForEach-Object {{
         [PSCustomObject]@{{
             Id = $_.Id
-            Time = $_.TimeCreated.ToString("o")
+            Time = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
             Message = $_.Message
             User = $_.Properties[5].Value
         }}
@@ -29,14 +29,19 @@ def read_windows_security_events(limit=10):
             events = []
             for item in data:
                 events.append({
-                    "timestamp": datetime.fromisoformat(item.get("Time")),
+                    # Store directly as 24-hour formatted string (local IST time)
+                    "timestamp": item.get("Time", datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
                     "event_id": item.get("Id", 0),
                     "source": "Windows Security Log",
                     "user": str(item.get("User", "SYSTEM")),
-                    "host": "localhost",
+                    "host": "192.168.1.103",  # Registered to your local network IP
                     "message": str(item.get("Message", ""))[:300].replace('\n', ' ')
                 })
             return events
     except Exception as e:
         pass
     return []
+
+def prime_baseline():
+    """Placeholder to prevent ImportError in main.py"""
+    pass

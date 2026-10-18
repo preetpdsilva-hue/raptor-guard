@@ -44,6 +44,35 @@
     button { background: var(--primary-blue); color: white; border: none; font-weight: 600; cursor: pointer; }
     button:hover { opacity: 0.9; }
 
+    /* Active Threat Banner (Level >= 4 & Open) */
+    #activeAlertsContainer {
+      margin-bottom: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .alert-banner-card {
+      background: linear-gradient(135deg, #fef2f2 0%, #fff1f2 100%);
+      border: 1px solid #fecaca;
+      border-left: 5px solid var(--danger);
+      padding: 16px 20px;
+      border-radius: 8px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 4px 6px -1px rgba(220, 38, 38, 0.1);
+      animation: pulseAlert 2s infinite;
+    }
+    @keyframes pulseAlert {
+      0% { border-color: rgba(220, 38, 38, 0.6); }
+      50% { border-color: rgba(220, 38, 38, 1); }
+      100% { border-color: rgba(220, 38, 38, 0.6); }
+    }
+    .alert-banner-info { display: flex; align-items: center; gap: 16px; }
+    .alert-banner-badge { background: var(--danger); color: white; padding: 4px 10px; border-radius: 4px; font-weight: 700; font-size: 12px; }
+    .alert-banner-text h4 { font-size: 14px; font-weight: 700; color: #991b1b; margin-bottom: 2px; }
+    .alert-banner-text p { font-size: 12px; color: #7f1d1d; }
+
     .metrics-grid {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
@@ -137,8 +166,12 @@
       <input type="text" id="targetIpInput" placeholder="Add IP (e.g. 192.168.1.103)" />
       <button onclick="addAndSwitchHost()">Connect</button>
       <span id="clockTime" style="font-size: 13px; font-weight:600; margin-left:12px; color: var(--text-muted);">--:--:--</span>
+      <button onclick="window.location.href='/api/auth/logout'" style="background: var(--danger); margin-left: 8px;">Logout SOC</button>
     </div>
   </header>
+
+  <!-- Active Unresolved Threats Banner (Level >= 4) -->
+  <div id="activeAlertsContainer"></div>
 
   <div class="metrics-grid">
     <div class="metric-card">
@@ -225,11 +258,18 @@
     let areaChart, mitreChart;
 
     function updateClock() {
-      const d = new Date();
-      document.getElementById('clockTime').textContent = d.toLocaleTimeString();
+      document.getElementById('clockTime').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
     }
     setInterval(updateClock, 1000);
     updateClock();
+
+    function formatLogTime(rawTime) {
+      if (!rawTime) return new Date().toLocaleTimeString('en-GB', { hour12: false });
+      const str = String(rawTime).replace('T', ' ').trim();
+      if (str.length >= 19) return str.substring(11, 19);
+      if (str.length >= 8) return str.substring(0, 8);
+      return str;
+    }
 
     function initCharts() {
       const areaCtx = document.getElementById('areaChart').getContext('2d');
@@ -298,14 +338,20 @@
       mitreDist = {}; lastSeenId = 0;
       areaData = Array(20).fill(0);
       document.getElementById('tableBody').innerHTML = '';
+      renderActiveAlertsBanner();
       renderMetrics();
     }
 
     function openTriage(id) {
-      const log = logs.find(l => l.id === id);
-      if (!log) return;
-      document.getElementById('modalLogId').value = id;
-      document.getElementById('modalIp').value = log.ip || "127.0.0.1";
+      // Force lookup parsing both as string and number to avoid type mismatches
+      const log = logs.find(l => String(l.id) === String(id));
+      if (!log) {
+        console.error("Log ID not found in local state:", id);
+        alert("Error: Log details not found in current view.");
+        return;
+      }
+      document.getElementById('modalLogId').value = log.id;
+      document.getElementById('modalIp').value = log.ip || "192.168.1.103";
       document.getElementById('modalRawMessage').textContent = log.message || "No telemetry captured.";
       document.getElementById('modalNotes').value = log.analyst_notes || '';
       document.getElementById('triageModal').style.display = 'flex';
@@ -347,9 +393,44 @@
         log.analyst_notes = notes;
         if (verdictType === 'TP') blockedCount++;
         renderMetrics();
+        renderActiveAlertsBanner();
         rerenderTable();
       }
       closeModal();
+    }
+
+   function renderActiveAlertsBanner() {
+      const container = document.getElementById('activeAlertsContainer');
+      // Filter for unresolved (Open) threats with Level >= 4
+      const activeThreats = logs.filter(l => (parseInt(l.level) || 3) >= 4 && l.response_status === 'Open');
+
+      if (activeThreats.length === 0) {
+        container.innerHTML = '';
+        return;
+      }
+
+      // Deduplicate active threats by their message/type so identical background logs don't spam
+      const uniqueMap = new Map();
+      activeThreats.forEach(t => {
+        const key = (t.type || '') + (t.message || '').substring(0, 30);
+        if (!uniqueMap.has(key)) {
+          uniqueMap.set(key, t);
+        }
+      });
+      const uniqueThreats = Array.from(uniqueMap.values()).slice(0, 3); // Show at most 3 unique active alerts
+
+      container.innerHTML = uniqueThreats.map(t => `
+        <div class="alert-banner-card">
+          <div class="alert-banner-info">
+            <span class="alert-banner-badge">LEVEL ${t.level} THREAT</span>
+            <div class="alert-banner-text">
+              <h4>${t.type} (${t.ip || '192.168.1.103'})</h4>
+              <p><strong>Tactic:</strong> ${t.mitre_tactic} | <strong>Time:</strong> ${formatLogTime(t.time)} | <strong>Message:</strong> ${(t.message || '').substring(0, 90)}...</p>
+            </div>
+          </div>
+          <button style="background: var(--danger); padding: 8px 16px;" onclick="openTriage(${t.id})">Triage & Respond</button>
+        </div>
+      `).join('');
     }
 
     function pushEvent(ev) {
@@ -374,6 +455,7 @@
       areaChart.update();
 
       renderRow(ev);
+      renderActiveAlertsBanner();
     }
 
     function renderMetrics() {
@@ -396,13 +478,15 @@
       if (ev.response_status === 'True_Positive') statusBadge = '<span class="soc-badge soc-tp">TRUE POSITIVE</span>';
       if (ev.response_status === 'False_Positive') statusBadge = '<span class="soc-badge soc-fp">FALSE POSITIVE</span>';
 
+      const displayTime = formatLogTime(ev.time || ev.timestamp);
+
       tr.innerHTML = `
-        <td>${String(ev.time).substring(11, 19) || 'Just now'}</td>
-        <td style="font-weight:600; color:var(--primary-blue);">${ev.ip}</td>
-        <td>${ev.target || 'SYSTEM'}</td>
+        <td>${displayTime}</td>
+        <td style="font-weight:600; color:var(--primary-blue);">${ev.ip || ev.host || 'localhost'}</td>
+        <td>${ev.target || ev.user || 'SYSTEM'}</td>
         <td style="font-family: monospace;">${ev.mitre_technique || 'None'}</td>
         <td>${ev.mitre_tactic || 'General'}</td>
-        <td>${ev.type}</td>
+        <td>${ev.type || ('Event ID ' + ev.event_id)}</td>
         <td><span class="lvl-badge ${lvlClass}">${lvl}</span></td>
         <td>${statusBadge}</td>
         <td><button class="btn-triage" onclick="openTriage(${ev.id})">Triage</button></td>

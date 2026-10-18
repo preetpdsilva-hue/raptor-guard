@@ -4,6 +4,7 @@ storage.py — Thread-safe SQLite storage engine for Raptor Guard.
 
 import sqlite3
 import json
+from datetime import datetime
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "events.db"
@@ -14,6 +15,27 @@ def get_connection():
     conn = sqlite3.connect(DB_PATH, timeout=10.0)
     conn.execute("PRAGMA journal_mode=WAL;")  # Enable WAL mode for high concurrency
     return conn
+
+
+def format_24h_local(ts):
+    """Converts datetime objects or ISO strings to local 24-hour format (YYYY-MM-DD HH:MM:SS)."""
+    if not ts:
+        return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if isinstance(ts, datetime):
+        if ts.tzinfo is not None:
+            ts = ts.astimezone()  # Shift to local IST timezone
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    
+    ts_str = str(ts).strip()
+    try:
+        # Handle ISO strings with 'T', 'Z', or timezone offsets
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone()
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        # Fallback: strip 'T' and milliseconds if already close to standard format
+        return ts_str.replace("T", " ")[:19]
 
 
 def init_db():
@@ -53,6 +75,16 @@ def init_db():
 
     conn.execute("CREATE TABLE IF NOT EXISTS targets (host TEXT UNIQUE)")
     conn.execute("INSERT OR IGNORE INTO targets (host) VALUES ('127.0.0.1')")
+
+    # Automatically clean up any existing ISO 'T' timestamps in the database
+    conn.execute(
+        """
+        UPDATE events 
+        SET timestamp = replace(substr(timestamp, 1, 19), 'T', ' ') 
+        WHERE timestamp LIKE '%T%'
+        """
+    )
+
     conn.commit()
     conn.close()
 
@@ -75,7 +107,7 @@ def add_target(host):
 
 def save_event(event):
     conn = get_connection()
-    ts_str = event["timestamp"].isoformat() if hasattr(event["timestamp"], "isoformat") else str(event["timestamp"])
+    ts_str = format_24h_local(event.get("timestamp"))
 
     conn.execute(
         """
@@ -121,7 +153,11 @@ def get_recent(limit=100, host_filter=None):
     params.append(limit)
 
     cur = conn.execute(query, params)
-    rows = [dict(r) for r in cur.fetchall()]
+    rows = []
+    for r in cur.fetchall():
+        d = dict(r)
+        d["timestamp"] = format_24h_local(d.get("timestamp"))
+        rows.append(d)
     conn.close()
     return rows
 

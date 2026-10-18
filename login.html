@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Raptor Guard — SOC Authentication Portal</title>
+  <style>
+    :root {
+      --bg-dark: #090d16;
+      --card-bg: #111827;
+      --border: #1f2937;
+      --text-main: #f9fafb;
+      --text-muted: #9ca3af;
+      --primary: #0ea5e9;
+      --primary-hover: #0284c7;
+      --danger: #ef4444;
+      --success: #10b981;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    body {
+      background: radial-gradient(circle at top, #1e293b 0%, var(--bg-dark) 70%);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+    .soc-banner {
+      background: rgba(239, 68, 68, 0.12);
+      border: 1px solid rgba(239, 68, 68, 0.35);
+      color: #fca5a5;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      text-transform: uppercase;
+      padding: 6px 14px;
+      border-radius: 999px;
+      margin-bottom: 20px;
+    }
+    .auth-card {
+      background: var(--card-bg);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 420px;
+      padding: 32px;
+      box-shadow: 0 20px 45px rgba(0, 0, 0, 0.6);
+    }
+    .brand-title { font-size: 24px; font-weight: 800; color: #38bdf8; letter-spacing: -0.5px; }
+    .brand-sub { font-size: 13px; color: var(--text-muted); margin-top: 4px; margin-bottom: 24px; }
+    .form-group { margin-bottom: 16px; }
+    label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
+    input {
+      width: 100%;
+      padding: 11px 14px;
+      background: #0b0f19;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-main);
+      font-size: 14px;
+      outline: none;
+      transition: border 0.2s;
+    }
+    input:focus { border-color: var(--primary); }
+    .otp-input {
+      font-size: 22px;
+      letter-spacing: 8px;
+      text-align: center;
+      font-family: monospace;
+      font-weight: 700;
+    }
+    .btn {
+      width: 100%;
+      padding: 12px;
+      background: var(--primary);
+      color: #fff;
+      font-weight: 700;
+      font-size: 14px;
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-top: 8px;
+      transition: background 0.2s;
+    }
+    .btn:hover { background: var(--primary-hover); }
+    .link-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 16px;
+      font-size: 13px;
+    }
+    .link-btn {
+      color: #38bdf8;
+      background: none;
+      border: none;
+      cursor: pointer;
+      font-size: 13px;
+      text-decoration: underline;
+      padding: 0;
+      width: auto;
+    }
+    .alert {
+      display: none;
+      padding: 10px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 16px;
+    }
+    .alert-error { background: rgba(239, 68, 68, 0.15); border: 1px solid var(--danger); color: #fca5a5; }
+    .alert-success { background: rgba(16, 185, 129, 0.15); border: 1px solid var(--success); color: #6ee7b7; }
+    .view-section { display: none; }
+    .view-section.active { display: block; }
+    .footer-meta {
+      margin-top: 22px;
+      padding-top: 14px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="soc-banner">🔒 Restricted Access — Authorized SOC Analysts Only</div>
+
+  <div class="auth-card">
+    <div class="brand-title">Raptor Guard</div>
+    <div class="brand-sub">SIEM & SOAR Security Operations Center</div>
+
+    <div id="alertBox" class="alert"></div>
+
+    <!-- STEP 1: SOC CREDENTIALS -->
+    <div id="viewLogin" class="view-section active">
+      <div class="form-group">
+        <label>SOC Analyst Email</label>
+        <input type="email" id="loginEmail" placeholder="soc@raptorguard.local" required />
+      </div>
+      <div class="form-group">
+        <label>Master Password</label>
+        <input type="password" id="loginPassword" placeholder="••••••••••••" required />
+      </div>
+      <button class="btn" onclick="submitLogin()">Authenticate & Request OTP</button>
+      <div class="link-row">
+        <span style="color: var(--text-muted); font-size: 12px;">MFA Enforced</span>
+        <button class="link-btn" onclick="switchView('viewForgot')">Forgot Password?</button>
+      </div>
+    </div>
+
+    <!-- STEP 2: EMAIL OTP VERIFICATION -->
+    <div id="viewOtp" class="view-section">
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px;">
+        Enter the 6-digit cryptographic OTP sent to <strong id="otpTargetEmail" style="color: #fff;"></strong>
+      </p>
+      <div class="form-group">
+        <label>6-Digit Verification OTP</label>
+        <input type="text" id="otpCodeInput" class="otp-input" maxlength="6" placeholder="000000" />
+      </div>
+      <button class="btn" onclick="submitOtp()">Verify OTP & Enter SOC</button>
+      <div class="link-row">
+        <button class="link-btn" onclick="switchView('viewLogin')">← Back to Login</button>
+        <button class="link-btn" onclick="submitLogin()">Resend OTP</button>
+      </div>
+    </div>
+
+    <!-- STEP 3: FORGOT PASSWORD (REQUEST OTP) -->
+    <div id="viewForgot" class="view-section">
+      <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 14px;">
+        Enter your registered SOC email to receive a password recovery OTP.
+      </p>
+      <div class="form-group">
+        <label>Registered SOC Email</label>
+        <input type="email" id="forgotEmail" placeholder="soc@raptorguard.local" />
+      </div>
+      <button class="btn" onclick="requestResetOtp()">Send Recovery OTP</button>
+      <div class="link-row">
+        <button class="link-btn" onclick="switchView('viewLogin')">← Back to Login</button>
+      </div>
+    </div>
+
+    <!-- STEP 4: RESET PASSWORD WITH OTP -->
+    <div id="viewReset" class="view-section">
+      <div class="form-group">
+        <label>Recovery OTP Code</label>
+        <input type="text" id="resetOtpInput" class="otp-input" maxlength="6" placeholder="000000" />
+      </div>
+      <div class="form-group">
+        <label>New SOC Password (Min 8 chars)</label>
+        <input type="password" id="resetNewPassword" placeholder="••••••••••••" />
+      </div>
+      <button class="btn" onclick="submitPasswordReset()">Update SOC Password</button>
+      <div class="link-row">
+        <button class="link-btn" onclick="switchView('viewLogin')">← Cancel</button>
+      </div>
+    </div>
+
+    <div class="footer-meta">
+      <span>24H UTC/IST Sync</span>
+      <span id="portalClock">--:--:--</span>
+    </div>
+  </div>
+
+  <script>
+    function updatePortalClock() {
+      document.getElementById('portalClock').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+    }
+    setInterval(updatePortalClock, 1000);
+    updatePortalClock();
+
+    function showAlert(msg, isError = true) {
+      const box = document.getElementById('alertBox');
+      box.style.display = 'block';
+      box.className = 'alert ' + (isError ? 'alert-error' : 'alert-success');
+      box.textContent = msg;
+    }
+
+    function switchView(viewId) {
+      document.getElementById('alertBox').style.display = 'none';
+      document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
+      document.getElementById(viewId).classList.add('active');
+    }
+
+    async function submitLogin() {
+      const email = document.getElementById('loginEmail').value.trim();
+      const password = document.getElementById('loginPassword').value;
+      if (!email || !password) return showAlert("Please enter both SOC email and password.");
+
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password })
+      });
+      const data = await res.json();
+
+      if (data.status === 'otp_sent') {
+        document.getElementById('otpTargetEmail').textContent = email;
+        switchView('viewOtp');
+        showAlert(data.message, false);
+      } else {
+        showAlert(data.message || "Authentication failed.");
+      }
+    }
+
+    async function submitOtp() {
+      const email = document.getElementById('loginEmail').value.trim();
+      const otp = document.getElementById('otpCodeInput').value.trim();
+      if (otp.length !== 6) return showAlert("Please enter the 6-digit OTP code.");
+
+      const res = await fetch('/api/auth/verify-otp', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, otp })
+      });
+      const data = await res.json();
+
+      if (data.status === 'success') {
+        window.location.href = '/';
+      } else {
+        showAlert(data.message || "OTP verification failed.");
+      }
+    }
+
+    async function requestResetOtp() {
+      const email = document.getElementById('forgotEmail').value.trim();
+      if (!email) return showAlert("Enter your registered SOC email.");
+
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json();
+
+      if (data.status === 'otp_sent') {
+        switchView('viewReset');
+        showAlert(data.message, false);
+      } else {
+        showAlert(data.message || "Unable to send recovery OTP.");
+      }
+    }
+
+    async function submitPasswordReset() {
+      const email = document.getElementById('forgotEmail').value.trim();
+      const otp = document.getElementById('resetOtpInput').value.trim();
+      const new_password = document.getElementById('resetNewPassword').value;
+
+      const res = await fetch('/api/auth/reset-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, otp, new_password })
+      });
+      const data = await res.json();
+
+      if (data.status === 'success') {
+        switchView('viewLogin');
+        showAlert(data.message, false);
+      } else {
+        showAlert(data.message || "Password reset failed.");
+      }
+    }
+  </script>
+</body>
+</html>

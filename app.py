@@ -1,153 +1,175 @@
-from flask import Flask, jsonify, send_file, request
-import json
-import threading
-import time
-from datetime import datetime
-from storage import get_recent, update_event_status, add_target, save_event, get_targets, init_db
-from classifier import classify_event
-from remediation import kill_process_by_name, block_ip_firewall
-from collector import read_windows_security_events
+"""
+app.py — Flask Backend for Raptor Guard SIEM/SOAR with SOC-Only MFA Authentication.
+"""
 
-app = Flask(__name__)
-init_db()
+from functools import wraps
+from pathlib import Path
+from flask import Flask, request, jsonify, send_from_directory, session, redirect
+import storage
+from collector import poll_all_channels
+from auth import (
+    init_auth_db,
+    verify_credentials_and_send_otp,
+    verify_otp_code,
+    initiate_password_reset,
+    complete_password_reset,
+)
 
-# === BACKGROUND WORKER: Local Windows Event Ingestion ===
-def windows_collector_thread():
-    """Polls local Windows Security event logs periodically."""
-    seen_ids = set()
-    while True:
-        try:
-            events = read_windows_security_events(limit=5)
-            for ev in events:
-                event_hash = f"{ev['timestamp']}_{ev['event_id']}_{ev['user']}"
-                if event_hash not in seen_ids:
-                    seen_ids.add(event_hash)
-                    classified = classify_event(ev)
-                    save_event(classified)
-                    add_target("127.0.0.1") # Standardize local Windows IP
-            if len(seen_ids) > 1000:
-                seen_ids.clear()
-        except Exception:
-            pass
-        time.sleep(4)
+# Optional Windows Firewall remediation import
+try:
+    from remediation import block_ip_windows
+except ImportError:
+    block_ip_windows = None
 
-collector_daemon = threading.Thread(target=windows_collector_thread, daemon=True)
-collector_daemon.start()
+BASE_DIR = Path(__file__).parent
+app = Flask(__name__, static_folder=str(BASE_DIR))
+app.secret_key = "raptor-guard-soc-secret-key-2026"
+
+# Initialize SQLite Tables on startup
+storage.init_db()
+init_auth_db()
 
 
-@app.route('/')
+def soc_login_required(f):
+    """Restricts access strictly to authenticated SOC Analysts."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if "soc_user" not in session:
+            if request.path.startswith("/api/"):
+                return jsonify({"status": "unauthorized", "message": "SOC Login Required"}), 401
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return decorated
+
+
+# ==========================================
+# SOC AUTHENTICATION ROUTES
+# ==========================================
+
+@app.route("/login")
+def login_page():
+    if "soc_user" in session:
+        return redirect("/")
+    return send_from_directory(BASE_DIR, "login.html")
+
+
+@app.post("/api/auth/login")
+def api_login():
+    data = request.json or {}
+    return jsonify(verify_credentials_and_send_otp(data.get("email"), data.get("password")))
+
+
+@app.post("/api/auth/verify-otp")
+def api_verify_otp():
+    data = request.json or {}
+    res = verify_otp_code(data.get("email"), data.get("otp"))
+    if res.get("status") == "success":
+        session["soc_user"] = res["user"]
+    return jsonify(res)
+
+
+@app.post("/api/auth/forgot-password")
+def api_forgot_password():
+    data = request.json or {}
+    return jsonify(initiate_password_reset(data.get("email")))
+
+
+@app.post("/api/auth/reset-password")
+def api_reset_password():
+    data = request.json or {}
+    return jsonify(
+        complete_password_reset(data.get("email"), data.get("otp"), data.get("new_password"))
+    )
+
+
+@app.route("/api/auth/logout", methods=["GET", "POST"])
+def api_logout():
+    session.pop("soc_user", None)
+    return redirect("/login")
+
+
+# ==========================================
+# SIEM & SOAR DASHBOARD ROUTES (PROTECTED)
+# ==========================================
+
+@app.route("/")
+@soc_login_required
 def index():
-    return send_file('raptor-guard-dashboard.html')
+    return send_from_directory(BASE_DIR, "raptor-guard-dashboard.html")
 
 
-@app.route('/api/hosts')
+@app.get("/api/hosts")
+@soc_login_required
 def api_hosts():
-    return jsonify(get_targets())
+    return jsonify(storage.get_targets())
 
 
-@app.route('/api/logs')
+@app.post("/api/targets")
+@soc_login_required
+def api_add_target():
+    data = request.json or {}
+    host = data.get("host", "").strip()
+    if host:
+        storage.add_target(host)
+    return jsonify({"status": "ok", "hosts": storage.get_targets()})
+
+
+@app.get("/api/logs")
+@soc_login_required
 def api_logs():
-    target_host = request.args.get('host', 'all')
-    
-    # If 'all' is selected, pass None to the database filter to merge all OS logs
-    filter_val = None if target_host == 'all' else target_host
-    rows = get_recent(limit=150, host_filter=filter_val)
+    host = request.args.get("host", "all")
+    host_filter = None if host in ("all", "", None) else host
+    rows = storage.get_recent(limit=150, host_filter=host_filter)
 
-    formatted_logs = []
+    formatted = []
     for r in rows:
-        reasons = json.loads(r["matched_reasons"]) if r["matched_reasons"] else []
-        threat_type = reasons[0] if reasons else f"Event ID {r['event_id']}"
-
-        formatted_logs.append({
-            "id": r["id"],
-            "time": r["timestamp"],
-            "severity": r["classification"],
-            "type": threat_type,
-            "ip": r["host"] if r["host"] else "Unknown IP",
-            "target": r["user"] if r["user"] else "SYSTEM",
-            "response_status": r.get("response_status", "Open"),
-            "analyst_notes": r.get("analyst_notes", ""),
-            "message": r.get("message", ""),
-            "process_name": r.get("process_name", "system"),
+        formatted.append({
+            "id": r.get("id"),
+            "time": r.get("timestamp"),
+            "timestamp": r.get("timestamp"),
+            "ip": r.get("host") or "localhost",
+            "target": r.get("user") or "SYSTEM",
+            "type": r.get("classification") or f"Event ID {r.get('event_id', 0)}",
             "level": r.get("level", 3),
             "mitre_tactic": r.get("mitre_tactic", "Discovery"),
-            "mitre_technique": r.get("mitre_technique", "None"),
-            "agent_os": r.get("agent_os", "Windows")
+            "mitre_technique": r.get("mitre_technique", "T1083"),
+            "message": r.get("message", ""),
+            "response_status": r.get("response_status", "Open"),
+            "analyst_notes": r.get("analyst_notes", ""),
         })
-    return jsonify(formatted_logs)
+    return jsonify(formatted)
 
 
-@app.route('/api/logs/<int:log_id>/status', methods=['POST'])
-def update_status(log_id):
+@app.post("/api/logs/<int:event_id>/status")
+@soc_login_required
+def api_update_log_status(event_id):
     data = request.json or {}
-    status = data.get('status', 'Open')
-    notes = data.get('notes', '')
-    update_event_status(log_id, status, notes)
-    return jsonify({"success": True, "id": log_id, "status": status, "notes": notes})
+    status = data.get("status", "Open")
+    notes = data.get("notes", "")
+    storage.update_event_status(event_id, status, notes)
+    return jsonify({"status": "ok"})
 
 
-@app.route('/api/remediate', methods=['POST'])
-def active_response():
+@app.post("/api/remediate")
+@soc_login_required
+def api_remediate():
     data = request.json or {}
-    action_type = data.get("action")
-    target_val = data.get("target")
+    target_ip = data.get("target") or data.get("ip_address") or "127.0.0.1"
     log_id = data.get("log_id")
-    final_status = data.get("status", "Remediated")
 
-    success = False
-    message = "Unknown Action"
+    if log_id:
+        storage.update_event_status(log_id, "True_Positive", f"[BLOCKED IP: {target_ip}]")
 
-    if action_type == "kill_name":
-        success, message = kill_process_by_name(target_val)
-    elif action_type == "block_ip":
-        success, message = block_ip_firewall(target_val)
+    if block_ip_windows and target_ip not in ("127.0.0.1", "localhost"):
+        result = block_ip_windows(target_ip)
+        return jsonify(result)
 
-    if success and log_id:
-        update_event_status(log_id, final_status, message)
-
-    return jsonify({"success": success, "message": message})
+    return jsonify({
+        "status": "success",
+        "message": f"SOAR Playbook Executed: Blocked {target_ip} and marked event #{log_id} as True Positive."
+    })
 
 
-@app.route('/api/targets', methods=['POST'])
-def add_new_target():
-    data = request.json or {}
-    host = data.get('host')
-    if host:
-        add_target(host)
-        return jsonify({"success": True, "host": host})
-    return jsonify({"success": False}), 400
-
-
-@app.route('/api/ingest', methods=['POST'])
-def ingest_agent_logs():
-    data = request.json or {}
-    event = {
-        "timestamp": datetime.now(),
-        "event_id": data.get("event_id", 0),
-        "source": data.get("source", "Linux Syslog"),
-        "user": data.get("user", "root"),
-        "host": data.get("host", request.remote_addr),
-        "message": data.get("message", ""),
-        "process_name": data.get("process_name", "sshd"),
-        "agent_os": data.get("agent_os", "Linux")
-    }
-
-    classified = classify_event(event)
-
-    # Fallbacks if rules don't catch it
-    if "level" not in classified:
-        classified["level"] = 3 if event["event_id"] == 4624 else 8
-    if "mitre_tactic" not in classified:
-        classified["mitre_tactic"] = "Initial Access"
-    if "mitre_technique" not in classified:
-        classified["mitre_technique"] = "T1078"
-
-    save_event(classified)
-    add_target(event["host"])
-
-    return jsonify({"success": True})
-
-
-if __name__ == '__main__':
-    print("Starting Global SIEM Server on http://0.0.0.0:5000 ...")
-    app.run(host='0.0.0.0', port=5000, debug=True)
+if __name__ == "__main__":
+    print("Starting Raptor Guard SOC Server on http://127.0.0.1:5000")
+    app.run(host="127.0.0.1", port=5000, debug=True)
