@@ -152,16 +152,18 @@
   </style>
 </head>
 <body>
-
   <header>
     <div class="brand">
       <h1>Raptor Guard</h1>
       <span class="badge">SIEM / SOC Operations</span>
     </div>
     <div class="controls">
+      <button id="autoSoarBtn" onclick="toggleAutoSoar()" style="background: var(--success); margin-left: 8px;">
+         Auto-SOAR (Lvl 4-9): ON
+      </button>
       <label for="deviceSelector" style="font-size: 12px; font-weight:600; color: var(--text-muted);">Target Host:</label>
       <select id="deviceSelector" onchange="selectHostFromDropdown()">
-        <option value="all">🌐 All Agents (Global View)</option>
+        <option value="all">?? All Agents (Global View)</option>
       </select>
       <input type="text" id="targetIpInput" placeholder="Add IP (e.g. 192.168.1.103)" />
       <button onclick="addAndSwitchHost()">Connect</button>
@@ -170,7 +172,7 @@
     </div>
   </header>
 
-  <!-- Active Unresolved Threats Banner (Level >= 4) -->
+<!-- Active Unresolved Threats Banner (Level >= 4) -->
   <div id="activeAlertsContainer"></div>
 
   <div class="metrics-grid">
@@ -248,27 +250,58 @@
     </div>
   </div>
 
-  <script>
+    <script>
     let currentSessionHost = "all";
     let logs = [];
     let lastSeenId = 0;
     let totalEvents = 0, level10Count = 0, authFailures = 0, blockedCount = 0;
     let areaData = Array(20).fill(0);
+    let areaChart = null;
+    let mitreChart = null;
     let mitreDist = {};
-    let areaChart, mitreChart;
+    let resolvedSignatures = new Set();
+    let autoSoarEnabled = true;
+
+    function getThreatSignature(ev) {
+      return `${ev.type || ''}|${(ev.message || '').substring(0, 45)}`;
+    }
+
+    function formatLogTime(value) {
+      if (!value) return '?';
+      const date = new Date(value);
+      if (!Number.isNaN(date.getTime())) {
+        return date.toLocaleString([], {
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit'
+        });
+      }
+      return String(value);
+    }
 
     function updateClock() {
-      document.getElementById('clockTime').textContent = new Date().toLocaleTimeString('en-GB', { hour12: false });
+      const clock = document.getElementById('clockTime');
+      if (!clock) return;
+      clock.textContent = new Date().toLocaleTimeString([], {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+      });
     }
-    setInterval(updateClock, 1000);
-    updateClock();
 
-    function formatLogTime(rawTime) {
-      if (!rawTime) return new Date().toLocaleTimeString('en-GB', { hour12: false });
-      const str = String(rawTime).replace('T', ' ').trim();
-      if (str.length >= 19) return str.substring(11, 19);
-      if (str.length >= 8) return str.substring(0, 8);
-      return str;
+    function toggleAutoSoar() {
+      autoSoarEnabled = !autoSoarEnabled;
+      const btn = document.getElementById('autoSoarBtn');
+      if (!btn) return;
+      if (autoSoarEnabled) {
+        btn.textContent = '? Auto-SOAR (Lvl 4-9): ON';
+        btn.style.background = 'var(--success)';
+      } else {
+        btn.textContent = '? Auto-SOAR (Lvl 4-9): OFF';
+        btn.style.background = '#64748b';
+      }
     }
 
     function initCharts() {
@@ -276,148 +309,264 @@
       areaChart = new Chart(areaCtx, {
         type: 'line',
         data: {
-          labels: Array(20).fill(''),
+          labels: Array.from({ length: 20 }, (_, i) => i + 1),
           datasets: [{
+            label: 'Threat Level',
             data: areaData,
             borderColor: '#0066cc',
             backgroundColor: 'rgba(0, 102, 204, 0.12)',
             fill: true,
             tension: 0.3,
-            pointRadius: 2
+            borderWidth: 2
           }]
         },
-        options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { display: false }, y: { beginAtZero: true, max: 15 } } }
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { display: false },
+            y: { beginAtZero: false, min: 0, max: 10 }
+          }
+        }
       });
 
       const mitreCtx = document.getElementById('mitreChart').getContext('2d');
       mitreChart = new Chart(mitreCtx, {
         type: 'doughnut',
-        data: { labels: [], datasets: [{ data: [], backgroundColor: ['#0066cc', '#16a34a', '#d97706', '#dc2626', '#8b5cf6'] }] },
-        options: { responsive: true, maintainAspectRatio: false, cutout: '65%', plugins: { legend: { position: 'right', labels: { boxWidth: 10, font: { size: 11 } } } } }
+        data: {
+          labels: [],
+          datasets: [{
+            data: [],
+            backgroundColor: ['#0066cc', '#16a34a', '#d97706', '#dc2626', '#7c3aed', '#0ea5e9']
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: { legend: { position: 'bottom' } }
+        }
       });
+
+      const searchBox = document.getElementById('searchBox');
+      if (searchBox) {
+        searchBox.addEventListener('input', rerenderTable);
+      }
+      updateClock();
+      setInterval(updateClock, 1000);
     }
 
     async function loadDeviceList() {
       try {
         const res = await fetch('/api/hosts');
-        if (res.ok) {
-          const hosts = await res.json();
-          const sel = document.getElementById('deviceSelector');
-          sel.innerHTML = '<option value="all">🌐 All Agents (Global View)</option>';
-          hosts.forEach(h => {
-            const opt = document.createElement('option');
-            opt.value = h;
-            opt.textContent = h;
-            if (h === currentSessionHost) opt.selected = true;
-            sel.appendChild(opt);
-          });
+        if (!res.ok) return;
+        const hosts = await res.json();
+        const selector = document.getElementById('deviceSelector');
+        if (!selector) return;
+        selector.innerHTML = '<option value="all">?? All Agents (Global View)</option>';
+
+        hosts.forEach(host => {
+          const option = document.createElement('option');
+          option.value = host;
+          option.textContent = host;
+          selector.appendChild(option);
+        });
+
+        if (hosts.includes(currentSessionHost)) {
+          selector.value = currentSessionHost;
+        } else {
+          currentSessionHost = 'all';
+          selector.value = 'all';
         }
       } catch (e) {}
     }
 
     function selectHostFromDropdown() {
-      switchHost(document.getElementById('deviceSelector').value);
+      const selector = document.getElementById('deviceSelector');
+      currentSessionHost = selector ? (selector.value || 'all') : 'all';
+      logs = [];
+      lastSeenId = 0;
+      totalEvents = 0;
+      level10Count = 0;
+      authFailures = 0;
+      blockedCount = 0;
+      mitreDist = {};
+      resolvedSignatures.clear();
+      renderMetrics();
+      rerenderTable();
+      renderActiveAlertsBanner();
+      if (mitreChart) {
+        mitreChart.data.labels = [];
+        mitreChart.data.datasets[0].data = [];
+        mitreChart.update();
+      }
+      if (areaChart) {
+        areaData = Array(20).fill(0);
+        areaChart.data.datasets[0].data = areaData;
+        areaChart.update();
+      }
     }
 
     async function addAndSwitchHost() {
-      const host = document.getElementById('targetIpInput').value.trim();
+      const input = document.getElementById('targetIpInput');
+      const host = (input ? input.value : '').trim();
       if (!host) return;
-      await fetch('/api/targets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ host: host })
-      });
-      await loadDeviceList();
-      switchHost(host);
+
+      try {
+        const res = await fetch('/api/targets', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ host })
+        });
+        if (res.ok) {
+          if (input) input.value = '';
+          await loadDeviceList();
+          const selector = document.getElementById('deviceSelector');
+          if (selector) {
+            currentSessionHost = host;
+            selector.value = host;
+          }
+          selectHostFromDropdown();
+        }
+      } catch (e) {}
     }
 
-    function switchHost(host) {
-      currentSessionHost = host;
-      logs = [];
-      totalEvents = 0; level10Count = 0; authFailures = 0; blockedCount = 0;
-      mitreDist = {}; lastSeenId = 0;
-      areaData = Array(20).fill(0);
-      document.getElementById('tableBody').innerHTML = '';
-      renderActiveAlertsBanner();
-      renderMetrics();
-    }
+    function openTriage(logId) {
+      const modal = document.getElementById('triageModal');
+      const log = logs.find(l => String(l.id) === String(logId));
+      if (!log || !modal) return;
 
-    function openTriage(id) {
-      // Force lookup parsing both as string and number to avoid type mismatches
-      const log = logs.find(l => String(l.id) === String(id));
-      if (!log) {
-        console.error("Log ID not found in local state:", id);
-        alert("Error: Log details not found in current view.");
-        return;
-      }
       document.getElementById('modalLogId').value = log.id;
-      document.getElementById('modalIp').value = log.ip || "192.168.1.103";
-      document.getElementById('modalRawMessage').textContent = log.message || "No telemetry captured.";
+      document.getElementById('modalIp').value = log.ip || log.host || 'localhost';
+      document.getElementById('modalRawMessage').textContent = JSON.stringify(log, null, 2);
       document.getElementById('modalNotes').value = log.analyst_notes || '';
-      document.getElementById('triageModal').style.display = 'flex';
+      modal.style.display = 'flex';
     }
 
     function closeModal() {
-      document.getElementById('triageModal').style.display = 'none';
+      const modal = document.getElementById('triageModal');
+      if (modal) modal.style.display = 'none';
+      const notesField = document.getElementById('modalNotes');
+      if (notesField) notesField.value = '';
+      const idField = document.getElementById('modalLogId');
+      if (idField) idField.value = '';
+      const ipField = document.getElementById('modalIp');
+      if (ipField) ipField.value = '';
+    }
+
+    async function runAutomatedMidLevelPlaybook(ev) {
+      const lvl = parseInt(ev.level) || 3;
+      const isOpen = String(ev.response_status || 'Open').toLowerCase() === 'open';
+
+      if (!autoSoarEnabled || !isOpen || lvl < 4 || lvl > 9) {
+        return;
+      }
+
+      const isRoutinePriv = String(ev.message || '').includes('Special privileges assigned to new logon');
+      const autoVerdict = (isRoutinePriv || lvl <= 5) ? 'False_Positive' : 'True_Positive';
+      const autoNote = autoVerdict === 'True_Positive'
+        ? `[AUTO-SOAR PLAYBOOK] Mid-level threat (Lvl ${lvl}) automatically contained and IP restricted.`
+        : `[AUTO-SOAR PLAYBOOK] Routine privilege/mid-level event (Lvl ${lvl}) verified and auto-closed.`;
+
+      ev.response_status = autoVerdict;
+      ev.analyst_notes = autoNote;
+      resolvedSignatures.add(getThreatSignature(ev));
+
+      if (autoVerdict === 'True_Positive') {
+        blockedCount++;
+        try {
+          await fetch('/api/remediate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              action: 'block_ip',
+              target: ev.ip || ev.host || '192.168.1.103',
+              log_id: ev.id,
+              status: 'True_Positive'
+            })
+          });
+        } catch (e) {}
+      }
+
+      try {
+        await fetch(`/api/logs/${ev.id}/status`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status: autoVerdict, notes: autoNote })
+        });
+      } catch (e) {}
     }
 
     async function executeVerdict(verdictType) {
-      const id = parseInt(document.getElementById('modalLogId').value);
+      const id = document.getElementById('modalLogId').value;
       const ip = document.getElementById('modalIp').value;
       let notes = document.getElementById('modalNotes').value.trim();
+      const newStatus = verdictType === 'TP' ? 'True_Positive' : 'False_Positive';
 
       if (verdictType === 'TP') {
-        notes = notes || "Confirmed malicious. IP blocked.";
+        notes = notes || 'Confirmed malicious. IP blocked.';
         await fetch('/api/remediate', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ action: 'block_ip', target: ip, log_id: id, status: 'True_Positive' })
         });
-        await fetch(`/api/logs/${id}/status`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'True_Positive', notes: '[TRUE POSITIVE] ' + notes })
-        });
       } else {
-        notes = notes || "Verified benign activity.";
-        await fetch(`/api/logs/${id}/status`, {
+        notes = notes || 'Verified benign activity.';
+      }
+
+      const targetLog = logs.find(l => String(l.id) === String(id));
+      const targetSig = targetLog ? getThreatSignature(targetLog) : null;
+      if (targetSig) {
+        resolvedSignatures.add(targetSig);
+      }
+
+      const matchingLogs = logs.filter(l =>
+        String(l.id) === String(id) || (targetSig && getThreatSignature(l) === targetSig && l.response_status === 'Open')
+      );
+
+      for (const item of matchingLogs) {
+        item.response_status = newStatus;
+        item.analyst_notes = notes;
+        fetch(`/api/logs/${item.id}/status`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status: 'False_Positive', notes: '[FALSE POSITIVE] ' + notes })
+          body: JSON.stringify({
+            status: newStatus,
+            notes: (verdictType === 'TP' ? '[TRUE POSITIVE] ' : '[FALSE POSITIVE] ') + notes
+          })
         });
       }
 
-      const log = logs.find(l => l.id === id);
-      if (log) {
-        log.response_status = verdictType === 'TP' ? 'True_Positive' : 'False_Positive';
-        log.analyst_notes = notes;
-        if (verdictType === 'TP') blockedCount++;
-        renderMetrics();
-        renderActiveAlertsBanner();
-        rerenderTable();
-      }
+      if (verdictType === 'TP') blockedCount++;
+      renderMetrics();
+      renderActiveAlertsBanner();
+      rerenderTable();
       closeModal();
     }
 
-   function renderActiveAlertsBanner() {
+    function renderActiveAlertsBanner() {
       const container = document.getElementById('activeAlertsContainer');
-      // Filter for unresolved (Open) threats with Level >= 4
-      const activeThreats = logs.filter(l => (parseInt(l.level) || 3) >= 4 && l.response_status === 'Open');
+      if (!container) return;
+
+      const activeThreats = logs.filter(l =>
+        (parseInt(l.level) || 3) >= 4 &&
+        l.response_status === 'Open' &&
+        !resolvedSignatures.has(getThreatSignature(l))
+      );
 
       if (activeThreats.length === 0) {
         container.innerHTML = '';
         return;
       }
 
-      // Deduplicate active threats by their message/type so identical background logs don't spam
       const uniqueMap = new Map();
       activeThreats.forEach(t => {
-        const key = (t.type || '') + (t.message || '').substring(0, 30);
+        const key = getThreatSignature(t);
         if (!uniqueMap.has(key)) {
           uniqueMap.set(key, t);
         }
       });
-      const uniqueThreats = Array.from(uniqueMap.values()).slice(0, 3); // Show at most 3 unique active alerts
+      const uniqueThreats = Array.from(uniqueMap.values()).slice(0, 3);
 
       container.innerHTML = uniqueThreats.map(t => `
         <div class="alert-banner-card">
@@ -428,12 +577,13 @@
               <p><strong>Tactic:</strong> ${t.mitre_tactic} | <strong>Time:</strong> ${formatLogTime(t.time)} | <strong>Message:</strong> ${(t.message || '').substring(0, 90)}...</p>
             </div>
           </div>
-          <button style="background: var(--danger); padding: 8px 16px;" onclick="openTriage(${t.id})">Triage & Respond</button>
+          <button style="background: var(--danger); padding: 8px 16px;" onclick="openTriage('${t.id}')">Triage & Respond</button>
         </div>
       `).join('');
     }
 
     function pushEvent(ev) {
+      runAutomatedMidLevelPlaybook(ev);
       logs.unshift(ev);
       if (logs.length > 200) logs.pop();
 
@@ -444,17 +594,22 @@
       if (ev.response_status === 'True_Positive') blockedCount++;
       renderMetrics();
 
-      const mKey = ev.mitre_tactic || "Discovery";
+      const mKey = ev.mitre_tactic || 'Discovery';
       mitreDist[mKey] = (mitreDist[mKey] || 0) + 1;
-      mitreChart.data.labels = Object.keys(mitreDist);
-      mitreChart.data.datasets[0].data = Object.values(mitreDist);
-      mitreChart.update();
+      if (mitreChart) {
+        mitreChart.data.labels = Object.keys(mitreDist);
+        mitreChart.data.datasets[0].data = Object.values(mitreDist);
+        mitreChart.update();
+      }
 
-      areaData.shift();
-      areaData.push(lvl);
-      areaChart.update();
+      if (areaChart) {
+        areaData.shift();
+        areaData.push(lvl);
+        areaChart.data.datasets[0].data = areaData;
+        areaChart.update();
+      }
 
-      renderRow(ev);
+      rerenderTable();
       renderActiveAlertsBanner();
     }
 
@@ -467,6 +622,8 @@
 
     function renderRow(ev) {
       const tbody = document.getElementById('tableBody');
+      if (!tbody) return;
+
       const tr = document.createElement('tr');
       const lvl = parseInt(ev.level) || 3;
 
@@ -479,7 +636,6 @@
       if (ev.response_status === 'False_Positive') statusBadge = '<span class="soc-badge soc-fp">FALSE POSITIVE</span>';
 
       const displayTime = formatLogTime(ev.time || ev.timestamp);
-
       tr.innerHTML = `
         <td>${displayTime}</td>
         <td style="font-weight:600; color:var(--primary-blue);">${ev.ip || ev.host || 'localhost'}</td>
@@ -491,13 +647,26 @@
         <td>${statusBadge}</td>
         <td><button class="btn-triage" onclick="openTriage(${ev.id})">Triage</button></td>
       `;
-      tbody.prepend(tr);
-      if (tbody.children.length > 100) tbody.lastChild.remove();
+      tbody.appendChild(tr);
+    }
+
+    function getVisibleLogs() {
+      const query = document.getElementById('searchBox')?.value || '';
+      const q = query.trim().toLowerCase();
+      if (!q) return logs;
+      return logs.filter(ev => {
+        const haystack = [
+          ev.ip, ev.host, ev.target, ev.user, ev.mitre_tactic, ev.mitre_technique, ev.type, ev.message, ev.response_status
+        ].filter(Boolean).join(' ').toLowerCase();
+        return haystack.includes(q);
+      });
     }
 
     function rerenderTable() {
-      document.getElementById('tableBody').innerHTML = '';
-      logs.forEach(ev => renderRow(ev));
+      const tbody = document.getElementById('tableBody');
+      if (!tbody) return;
+      tbody.innerHTML = '';
+      getVisibleLogs().forEach(ev => renderRow(ev));
     }
 
     async function fetchRealLogs() {
@@ -522,5 +691,6 @@
       fetchRealLogs();
     };
   </script>
+
 </body>
 </html>
